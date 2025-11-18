@@ -6,6 +6,11 @@ from cryptography.hazmat.primitives.asymmetric import rsa, padding
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.exceptions import InvalidSignature
 import graphviz
+from collections import OrderedDict
+
+# ---
+# 1. BLOCKCHAIN & WALLET CLASSES
+# ---
 
 class Wallet:
     """Manages RSA keys and wallet address"""
@@ -26,10 +31,7 @@ class Wallet:
 class Transaction:
     """
     Represents a signed transaction.
-    
-    *** MODIFICATION ***
-    Added 'service_data' and 'mileage' parameters to carry
-    service log information instead of just a numeric amount.
+    Carries service log data ('service_data', 'mileage').
     """
     def __init__(self, sender_address, recipient_address, service_data, mileage):
         self.sender_address = sender_address
@@ -81,14 +83,13 @@ class Transaction:
 def verify_transaction(transaction):
     """Verifies the signature of a transaction"""
     if transaction.sender_address == "SYSTEM":
-        return True # System transactions (like minting) are always valid
+        return True # System transactions are always valid
     
     if not transaction.signature:
         st.error("Transaction has no signature to verify.")
         return False
         
     try:
-        # Load the public key from the address string
         public_key = serialization.load_pem_public_key(
             transaction.sender_address.encode('utf-8')
         )
@@ -121,9 +122,7 @@ class Block:
 
     def hashdata(self):
         """Calculates the hash of the block"""
-        # We must sort the dicts in the tx_payload to ensure a consistent hash
         tx_payload = json.dumps([tx.to_dict() for tx in self.transactions], sort_keys=True)
-        
         block_string = str(self.index) + tx_payload + self.prev_hash + str(self.timestamp) + str(self.nonce)
         return hashlib.sha256(block_string.encode('utf-8')).hexdigest()
 
@@ -160,7 +159,6 @@ class Blockchain:
             st.info("No pending transactions to mine.")
             return False
 
-        # Create the mining reward transaction
         reward_tx = Transaction(
             sender_address="SYSTEM", 
             recipient_address=miner_address, 
@@ -187,7 +185,9 @@ class Blockchain:
 def is_valid_chain(chain):
     """Validates the entire blockchain"""
     for i, block in enumerate(chain):
-        if block.hashdata()[:block.difficulty] != '0' * block.difficulty:
+        # We access difficulty from the block's parent blockchain object if possible,
+        # but for this app, we'll hardcode the check.
+        if block.hashdata()[:4] != '0000':
             st.error(f"Block {i} hash is invalid (Proof of Work failed).")
             return False
         
@@ -198,17 +198,50 @@ def is_valid_chain(chain):
     st.success("Chain is valid!")
     return True
 
+# ---
+# 2. NEW HELPER FUNCTION FOR SERVICE VALIDATION
+# ---
 
-# --- Streamlit Application UI ---
+def get_unconfirmed_services(blockchain, mechanic_address, owner_address):
+    """
+    Scans the blockchain to find services logged by the mechanic
+    that have not yet been confirmed by the owner.
+    """
+    # Use OrderedDict to remember the mileage (value) for each service (key)
+    all_services = OrderedDict()
+    confirmed_services = set()
+    
+    for block in blockchain.chain:
+        for tx in block.transactions:
+            
+            # Log all services added by the mechanic
+            if tx.sender_address == mechanic_address:
+                all_services[tx.service_data] = tx.mileage
+                
+            # Log all confirmations by the owner
+            elif tx.sender_address == owner_address and tx.service_data.startswith("CONFIRMED:"):
+                # Extract the original service name
+                original_service = tx.service_data.replace("CONFIRMED: ", "")
+                confirmed_services.add(original_service)
+
+    # Find which services are in 'all_services' but not in 'confirmed_services'
+    unconfirmed = OrderedDict()
+    for service, mileage in all_services.items():
+        if service not in confirmed_services:
+            unconfirmed[service] = mileage
+            
+    return unconfirmed
+
+# ---
+# 3. STREAMLIT APPLICATION UI
+# ---
 
 st.set_page_config(layout="wide", page_title="Vehicle Service Log")
-st.title("Vehicle Service Log on a Blockchain")
-st.markdown("""
-This app simulates a tamper-proof vehicle service log using your Python blockchain code.
-- **`DMV`**: Mints the vehicle (creates the first record).
-- **`Mechanic Shop`**: Signs and adds new service records.
-- **`Car Owner`**: The recipient of all records.
-""")
+st.title("⛓️ Vehicle Service Log on a Blockchain")
+
+# ---
+# 4. INITIALIZATION & SESSION STATE
+# ---
 
 if 'blockchain' not in st.session_state:
     st.session_state.blockchain = Blockchain()
@@ -218,7 +251,6 @@ if 'blockchain' not in st.session_state:
         "Car_Owner": Wallet()
     }
     
-    # "Mint" the vehicle: Create the first "transaction" from the DMV to the owner
     st.info("Initializing blockchain... Minting vehicle (VIN: 12345ABC)...")
     
     wallet_dmv = st.session_state.wallets["DMV"]
@@ -237,15 +269,26 @@ if 'blockchain' not in st.session_state:
     st.success("Vehicle Minted! Blockchain is live.")
 
 
+# Get the latest objects from session state
 blockchain = st.session_state.blockchain
 wallets = st.session_state.wallets
 addr_mechanic = wallets["Mechanic_Shop"].get_address()
 addr_owner = wallets["Car_Owner"].get_address()
 addr_dmv = wallets["DMV"].get_address()
 
+# ---
+# 5. DEFINE UI TABS
+# ---
 
-tab1, tab2, tab3 = st.tabs(["Add Service Record", "View Full Chain", "Visualize Chain Structure"])
+tab1, tab2, tab3, tab4 = st.tabs([
+    "Add Service Record (Mechanic)", 
+    "Confirm Service Done (Owner)",  # <-- NEW TAB
+    "View Full Chain", 
+    "Visualize Chain Structure"
+])
 
+
+# --- TAB 1: Add Service Record (Mechanic's View) ---
 with tab1:
     st.header("Add a New Service Record")
     st.markdown(f"**Signing As:** `Mechanic_Shop`")
@@ -272,16 +315,71 @@ with tab1:
                 blockchain.add_transaction(tx)
                 st.success("Transaction signed and added to pending pool.")
             
-            with st.spinner(f"Mining block {len(blockchain.chain)}... (This may take a moment)"):
-                # The DMV wallet acts as the miner here for simplicity
-                success = blockchain.mine_pending_transactions(addr_dmv)
+            with st.spinner(f"Mining block {len(blockchain.chain)}..."):
+                success = blockchain.mine_pending_transactions(addr_dmv) # DMV acts as miner
                 if success:
                     st.success(f"Block {len(blockchain.chain)-1} Mined Successfully!")
-                    st.balloons()
+                    st.toast('New service record added!', icon='🔧')
                 else:
                     st.error("Mining failed.")
 
+# --- TAB 2: Confirm Service Done (Owner's View) ---
 with tab2:
+    st.header("Confirm a Completed Service")
+    st.markdown(f"**Signing As:** `Car_Owner`")
+    st.markdown("Here you can cryptographically sign-off on services performed by the mechanic.")
+    
+    # Find all unconfirmed services
+    unconfirmed_services = get_unconfirmed_services(blockchain, addr_mechanic, addr_owner)
+    
+    if not unconfirmed_services:
+        st.success("All recorded services have been confirmed!")
+    else:
+        st.warning("The following services are awaiting your confirmation:")
+        
+        with st.form("confirm_form"):
+            # Create a list of options for the selectbox
+            options = list(unconfirmed_services.keys())
+            
+            selected_service = st.selectbox(
+                "Select service to confirm", 
+                options=options,
+                format_func=lambda x: f"{x} (at {unconfirmed_services[x]} miles)"
+            )
+            
+            confirm_button = st.form_submit_button("Confirm Service (Sign with Digital Signature)")
+
+        if confirm_button:
+            if selected_service:
+                with st.spinner("Creating and signing confirmation transaction..."):
+                    # Get the mileage from the service we are confirming
+                    mileage_at_service = unconfirmed_services[selected_service]
+                    
+                    # Create the new confirmation transaction
+                    tx = Transaction(
+                        sender_address=addr_owner, # From Owner
+                        recipient_address=addr_mechanic, # To Mechanic (as a receipt)
+                        service_data=f"CONFIRMED: {selected_service}",
+                        mileage=int(mileage_at_service) # Log the same mileage
+                    )
+                    
+                    tx.sign(wallets["Car_Owner"]) # Sign with Owner's key
+                    blockchain.add_transaction(tx)
+                    st.success("Confirmation transaction signed and added to pool.")
+                
+                with st.spinner(f"Mining block {len(blockchain.chain)}..."):
+                    success = blockchain.mine_pending_transactions(addr_dmv)
+                    if success:
+                        st.success(f"Block {len(blockchain.chain)-1} Mined Successfully!")
+                        st.toast('Service confirmed!', icon='🎉')
+                    else:
+                        st.error("Mining failed.")
+            else:
+                st.error("No service selected to confirm.")
+
+
+# --- TAB 3: View Full Chain ---
+with tab3:
     st.header("Complete Vehicle History (Immutable Log)")
     
     if st.checkbox("Validate Chain Integrity"):
@@ -299,26 +397,39 @@ with tab2:
             
             st.subheader("Transactions in this block:")
             for tx in block.transactions:
-                st.markdown(f"**Service Data:** `{tx.service_data}`")
-                st.markdown(f"**Mileage:** `{tx.mileage}`")
-                
                 # Prettify sender/recipient names for display
                 sender_name = next((name for name, wallet in wallets.items() if wallet.get_address() == tx.sender_address), "SYSTEM")
                 recipient_name = next((name for name, wallet in wallets.items() if wallet.get_address() == tx.recipient_address), "Unknown")
 
+                # --- NEW: Improved Transaction Display ---
+                if sender_name == "Mechanic_Shop":
+                    st.markdown(f"**Service Record:** `{tx.service_data}`")
+                elif sender_name == "Car_Owner":
+                    st.markdown(f"**Owner Confirmation:** `{tx.service_data}`")
+                elif sender_name == "DMV":
+                    st.markdown(f"**Vehicle Minted:** `{tx.service_data}`")
+                elif sender_name == "SYSTEM":
+                    st.markdown(f"**Mining Reward:** `{tx.service_data}`")
+                
+                st.markdown(f"**Mileage:** `{tx.mileage}`")
                 st.markdown(f"**From:** `{sender_name}`")
                 st.markdown(f"**To:** `{recipient_name}`")
                 
                 is_valid = verify_transaction(tx)
                 st.markdown(f"**Signature Valid:** {':white_check_mark:' if is_valid else ':x:'}")
+                
+                # Handle SYSTEM transactions with no signature
                 st.code(f"Signature: {tx.signature[:40]}..." if tx.signature else "Signature: N/A (SYSTEM Transaction)", language=None)
+                st.write("---")
 
-with tab3:
+
+# --- TAB 4: Visualize Chain Structure ---
+with tab4:
     st.header("Live Blockchain Visualization")
-    st.markdown("This graph shows the immutable links between blocks. Each block is cryptographically tied to the one before it.")
+    st.markdown("This graph shows the immutable links between blocks.")
 
     dot = graphviz.Digraph(comment='Blockchain')
-    dot.attr(rankdir='LR') # Left-to-Right layout
+    dot.attr(rankdir='LR') 
     dot.attr('node', shape='box', style='filled', color='skyblue')
 
     for i, block in enumerate(blockchain.chain):
@@ -327,7 +438,6 @@ with tab3:
         dot.node(f'block_{i}', label)
         
         if i > 0:
-            # The edge label shows the hash linkage
             dot.edge(f'block_{i-1}', f'block_{i}', label=f"prev_hash:\n{block.prev_hash[:10]}...")
 
     st.graphviz_chart(dot)

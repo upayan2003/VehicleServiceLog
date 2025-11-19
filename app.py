@@ -237,7 +237,7 @@ def get_unconfirmed_services(blockchain, mechanic_address, owner_address):
 # ---
 
 st.set_page_config(layout="wide", page_title="Vehicle Service Log")
-st.title("⛓️ Vehicle Service Log on a Blockchain")
+st.title("Vehicle Service Log on a Blockchain")
 
 # ---
 # 4. INITIALIZATION & SESSION STATE
@@ -371,7 +371,7 @@ with tab2:
                     success = blockchain.mine_pending_transactions(addr_dmv)
                     if success:
                         st.success(f"Block {len(blockchain.chain)-1} Mined Successfully!")
-                        st.toast('Service confirmed!', icon='🎉')
+                        st.toast('Service confirmed!', icon='✅')
                     else:
                         st.error("Mining failed.")
             else:
